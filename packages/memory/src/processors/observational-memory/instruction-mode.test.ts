@@ -4,14 +4,14 @@ import {
   composeObservationExtractors,
   composeReflectionExtractors,
   resolveContinuationHints,
-} from '../built-in-extractors';
-import { Extractor } from '../extractor';
+} from './built-in-extractors';
+import { Extractor } from './extractor';
 import {
   OBSERVER_EXTRACTION_INSTRUCTIONS,
   buildObserverSystemPrompt,
   resolveExtractionInstructions,
-} from '../observer-agent';
-import { REFLECTOR_CONSOLIDATION_INSTRUCTIONS, buildReflectorSystemPrompt } from '../reflector-agent';
+} from './observer-agent';
+import { REFLECTOR_CONSOLIDATION_INSTRUCTIONS, buildReflectorSystemPrompt } from './reflector-agent';
 
 const CUSTOM = 'Track entity IDs and the lifecycle state of every tool result.';
 
