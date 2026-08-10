@@ -87,6 +87,7 @@ export {
   hasCurrentTaskSection,
   extractCurrentTask,
   resolveExtractionInstructions,
+  resolveEffectiveObserverInstructions,
   OBSERVER_EXTRACTION_INSTRUCTIONS,
   type ObserverResult as ObserverAgentResult,
 } from './observer-agent';

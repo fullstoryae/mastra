@@ -37,8 +37,8 @@ import {
 import { getObservableMessages } from './message-utils';
 import type { ModelByInputTokens } from './model-by-input-tokens';
 import { didProviderChange } from './model-context';
+import { resolveEffectiveObserverInstructions } from './observer-agent';
 import { registerOp, unregisterOp, isOpActiveInProcess } from './operation-registry';
-import { resolveExtractionInstructions } from './observer-agent';
 import {
   buildReflectorSystemPrompt,
   buildReflectorPrompt,
@@ -265,9 +265,12 @@ export class ReflectorRunner {
         this.reflectionConfig.instruction,
         extractors,
         this.reflectionConfig.instructionMode,
-        // Tell the Reflector how observations were actually produced, which differs from
-        // OM's defaults whenever the Observer runs with instructionMode: 'replace'.
-        resolveExtractionInstructions(this.observationConfig.instruction, this.observationConfig.instructionMode),
+        // Tell the Reflector how observations were actually produced. This is the Observer's
+        // full effective guidance, so it covers both a replaced instruction and an appended one.
+        resolveEffectiveObserverInstructions(
+          this.observationConfig.instruction,
+          this.observationConfig.instructionMode,
+        ),
       ),
       model,
       ...(memory ? { memory } : {}),

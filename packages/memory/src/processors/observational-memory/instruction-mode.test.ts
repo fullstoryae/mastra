@@ -9,6 +9,7 @@ import { Extractor } from './extractor';
 import {
   OBSERVER_EXTRACTION_INSTRUCTIONS,
   buildObserverSystemPrompt,
+  resolveEffectiveObserverInstructions,
   resolveExtractionInstructions,
 } from './observer-agent';
 import { REFLECTOR_CONSOLIDATION_INSTRUCTIONS, buildReflectorSystemPrompt } from './reflector-agent';
@@ -35,6 +36,42 @@ describe('resolveExtractionInstructions', () => {
 
   it('returns the caller instruction in replace mode', () => {
     expect(resolveExtractionInstructions(CUSTOM, 'replace')).toBe(CUSTOM);
+  });
+});
+
+describe('resolveEffectiveObserverInstructions', () => {
+  it('combines the built-in guidance with the custom instruction in append mode', () => {
+    const effective = resolveEffectiveObserverInstructions(CUSTOM, 'append');
+
+    expect(effective).toContain(DEFAULT_EXTRACTION_MARKER);
+    expect(effective).toContain('=== CUSTOM INSTRUCTIONS ===');
+    expect(effective).toContain(CUSTOM);
+  });
+
+  it('returns only the caller instruction in replace mode', () => {
+    const effective = resolveEffectiveObserverInstructions(CUSTOM, 'replace');
+
+    expect(effective).toBe(CUSTOM);
+    expect(effective).not.toContain(DEFAULT_EXTRACTION_MARKER);
+  });
+
+  it('returns the built-in guidance when no instruction is configured', () => {
+    expect(resolveEffectiveObserverInstructions(undefined)).toBe(OBSERVER_EXTRACTION_INSTRUCTIONS);
+  });
+
+  // The Observer prompt interleaves the output format and guidelines between the extraction
+  // block and the custom-instruction suffix, so the effective guidance is not one contiguous
+  // slice of it — but every part of it must be present.
+  it('covers the guidance the observer prompt actually carries', () => {
+    for (const mode of ['append', 'replace'] as const) {
+      const prompt = buildObserverSystemPrompt(false, CUSTOM, false, undefined, mode);
+      const effective = resolveEffectiveObserverInstructions(CUSTOM, mode);
+
+      expect(prompt).toContain(resolveExtractionInstructions(CUSTOM, mode));
+      expect(effective).toContain(resolveExtractionInstructions(CUSTOM, mode));
+      expect(effective).toContain(CUSTOM);
+      expect(prompt).toContain(CUSTOM);
+    }
   });
 });
 
@@ -205,5 +242,110 @@ describe('prompts only reference continuation sections they define', () => {
 
     expect(prompt).toContain('<current-task>');
     expect(prompt).toContain('<suggested-response>');
+  });
+});
+
+describe('multi-thread prompt follows the active continuation sections', () => {
+  const multiThreadPrompt = (
+    continuationHints: Parameters<typeof composeObservationExtractors>[0]['continuationHints'],
+  ) =>
+    buildObserverSystemPrompt(
+      true,
+      undefined,
+      false,
+      composeObservationExtractors({ threadTitle: false, continuationHints }),
+    );
+
+  it('nests and demonstrates both sections by default', () => {
+    const prompt = multiThreadPrompt(undefined);
+
+    expect(prompt).toContain(
+      "Each thread's observations, current-task, and suggested-response should be nested inside",
+    );
+    expect(prompt).toContain('<current-task>');
+    expect(prompt).toContain('<suggested-response>');
+  });
+
+  it('omits suggested-response from the nesting instruction and examples when disabled', () => {
+    const prompt = multiThreadPrompt({ suggestedResponse: false });
+
+    expect(prompt).toContain("Each thread's observations and current-task should be nested inside");
+    expect(prompt).toContain('<current-task>');
+    expect(prompt).not.toContain('<suggested-response>');
+  });
+
+  it('omits current-task from the nesting instruction and examples when disabled', () => {
+    const prompt = multiThreadPrompt({ currentTask: false });
+
+    expect(prompt).toContain("Each thread's observations and suggested-response should be nested inside");
+    expect(prompt).toContain('<suggested-response>');
+    expect(prompt).not.toContain('<current-task>');
+  });
+
+  it('drops both sections entirely when continuation hints are disabled', () => {
+    const prompt = multiThreadPrompt(false);
+
+    expect(prompt).toContain("Each thread's observations should be nested inside");
+    expect(prompt).not.toContain('<current-task>');
+    expect(prompt).not.toContain('<suggested-response>');
+    // The thread scaffolding itself must survive so multi-thread output stays parseable.
+    expect(prompt).toContain('<thread id="thread_id_1">');
+    expect(prompt).toContain('=== MULTI-THREAD INPUT ===');
+  });
+
+  it('still lists thread-title alongside the enabled sections', () => {
+    const prompt = buildObserverSystemPrompt(
+      true,
+      undefined,
+      true,
+      composeObservationExtractors({ threadTitle: true, continuationHints: { suggestedResponse: false } }),
+    );
+
+    expect(prompt).toContain("Each thread's observations, current-task, and thread-title should be nested inside");
+    expect(prompt).toContain('<thread-title>');
+    expect(prompt).not.toContain('<suggested-response>');
+  });
+
+  it('leaves the default multi-thread prompt unchanged on the legacy path', () => {
+    expect(buildObserverSystemPrompt(true, undefined, false, undefined)).toContain(
+      "Each thread's observations, current-task, and suggested-response should be nested inside",
+    );
+  });
+
+  // Pins the exact default example so the section-driven template can't silently drift
+  // from the shape the multi-thread parser expects.
+  it('renders the default per-thread example verbatim', () => {
+    expect(buildObserverSystemPrompt(true, undefined, true, undefined)).toContain(
+      `<observations>
+<thread id="thread_id_1">
+Date: Dec 4, 2025
+* 🔴 (14:30) User prefers direct answers
+* 🔴 (14:31) Working on feature X
+
+<current-task>
+What the agent is currently working on in this thread
+</current-task>
+
+<suggested-response>
+Hint for the agent's next message in this thread
+</suggested-response>
+<thread-title>Feature X implementation</thread-title>
+</thread>
+
+<thread id="thread_id_2">
+Date: Dec 5, 2025
+* 🔴 (09:15) User asked about deployment
+
+<current-task>
+Current task for this thread
+</current-task>
+
+<suggested-response>
+Suggested response for this thread
+</suggested-response>
+<thread-title>Deployment setup</thread-title>
+</thread>
+</observations>`,
+    );
   });
 });
