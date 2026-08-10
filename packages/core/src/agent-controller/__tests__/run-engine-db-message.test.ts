@@ -244,4 +244,198 @@ describe('SessionRunEngine — MastraDBMessage contract', () => {
     expect(messageEnd?.message.content.metadata?.stopReason).toBe('error');
     expect(events).toContainEqual({ type: 'agent_end', reason: 'error' });
   });
+
+  it('Given a rejected model step, When the model retries, Then only accepted step content remains', async () => {
+    const { engine, events, session } = createHarness();
+
+    const result = await engine.processStream(
+      {
+        fullStream: (async function* () {
+          yield chunk({ type: 'step-start', payload: {} });
+          yield chunk({
+            type: 'tool-call',
+            payload: { toolCallId: 'accepted-tool', toolName: 'search', args: { query: 'accepted' } },
+          });
+          yield chunk({
+            type: 'tool-result',
+            payload: { toolCallId: 'accepted-tool', toolName: 'search', result: 'accepted result' },
+          });
+          yield chunk({
+            type: 'step-finish',
+            payload: { output: { usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 } } },
+          });
+
+          yield chunk({ type: 'step-start', payload: {} });
+          yield chunk({ type: 'reasoning-start', payload: { id: 'rejected-reasoning' } });
+          yield chunk({
+            type: 'reasoning-delta',
+            payload: { id: 'rejected-reasoning', text: 'rejected reasoning' },
+          });
+          yield chunk({ type: 'text-start', payload: { id: 'rejected-text' } });
+          yield chunk({ type: 'text-delta', payload: { id: 'rejected-text', text: 'rejected answer' } });
+          yield chunk({
+            type: 'tool-call-input-streaming-start',
+            payload: { toolCallId: 'rejected-tool', toolName: 'write' },
+          });
+          yield chunk({
+            type: 'tool-call-delta',
+            payload: { toolCallId: 'rejected-tool', toolName: 'write', argsTextDelta: '{"value":true}' },
+          });
+          yield chunk({
+            type: 'tool-call',
+            payload: { toolCallId: 'rejected-tool', toolName: 'write', args: { value: true } },
+          });
+          yield chunk({
+            type: 'step-finish',
+            payload: {
+              output: { usage: { inputTokens: 4, outputTokens: 3, totalTokens: 7 } },
+              stepResult: { reason: 'retry' },
+            },
+          });
+
+          yield chunk({ type: 'step-start', payload: {} });
+          yield chunk({ type: 'text-start', payload: { id: 'accepted-text' } });
+          yield chunk({ type: 'text-delta', payload: { id: 'accepted-text', text: 'accepted answer' } });
+          yield chunk({
+            type: 'step-finish',
+            payload: { output: { usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 } } },
+          });
+          yield chunk({ type: 'finish', payload: { stepResult: { reason: 'stop' } } });
+        })(),
+      },
+      requestContext(),
+    );
+
+    expect(result?.message.content.parts).toEqual([
+      {
+        type: 'tool-invocation',
+        toolInvocation: {
+          state: 'result',
+          toolCallId: 'accepted-tool',
+          toolName: 'search',
+          args: { query: 'accepted' },
+          result: 'accepted result',
+          isError: false,
+        },
+      },
+      { type: 'text', text: 'accepted answer' },
+    ]);
+    expect(JSON.stringify(result?.message.content)).not.toContain('rejected');
+    expect(session.getTokenUsage()).toMatchObject({ promptTokens: 9, completionTokens: 6, totalTokens: 15 });
+    expect(session.displayState.get().activeTools.get('accepted-tool')).toMatchObject({
+      status: 'completed',
+      result: 'accepted result',
+    });
+    expect(session.displayState.get().activeTools.has('rejected-tool')).toBe(false);
+    expect(session.displayState.get().toolInputBuffers.has('rejected-tool')).toBe(false);
+
+    const rejected = events.find(event => event.type === 'step_rejected');
+    expect(rejected).toMatchObject({
+      type: 'step_rejected',
+      toolCallIds: ['rejected-tool'],
+      message: {
+        content: {
+          parts: [
+            {
+              type: 'tool-invocation',
+              toolInvocation: { state: 'result', toolCallId: 'accepted-tool', result: 'accepted result' },
+            },
+          ],
+        },
+      },
+    });
+  });
+
+  it('Given a terminal tripwire, When the step is rejected, Then its provisional content is still rolled back', async () => {
+    const { engine, events } = createHarness();
+    const state = engine.createStreamState();
+    const ctx = requestContext();
+
+    await engine.processStreamChunk(state, chunk({ type: 'step-start', payload: {} }), ctx);
+    await engine.processStreamChunk(state, chunk({ type: 'text-start', payload: { id: 't1' } }), ctx);
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'text-delta', payload: { id: 't1', text: 'terminally rejected' } }),
+      ctx,
+    );
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'tripwire', payload: { reason: 'blocked', retry: false, processorId: 'validator' } }),
+      ctx,
+    );
+
+    const rejected = events.find(
+      (event): event is Extract<AgentControllerEvent, { type: 'step_rejected' }> => event.type === 'step_rejected',
+    );
+    expect(rejected?.message.content.parts).toEqual([]);
+    expect(rejected?.toolCallIds).toEqual([]);
+  });
+
+  it('Given a tripwire before any step starts, Then it does not invent a rollback event', async () => {
+    const { engine, events } = createHarness();
+
+    await engine.processStreamChunk(
+      engine.createStreamState(),
+      chunk({ type: 'tripwire', payload: { reason: 'blocked', retry: false } }),
+      requestContext(),
+    );
+
+    expect(events.some(event => event.type === 'step_rejected')).toBe(false);
+  });
+
+  it('Given an accepted step, When a later tripwire arrives before another step, Then accepted content remains', async () => {
+    const { engine, events } = createHarness();
+    const state = engine.createStreamState();
+    const ctx = requestContext();
+
+    await engine.processStreamChunk(state, chunk({ type: 'step-start', payload: {} }), ctx);
+    await engine.processStreamChunk(state, chunk({ type: 'text-start', payload: { id: 'accepted' } }), ctx);
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'text-delta', payload: { id: 'accepted', text: 'accepted answer' } }),
+      ctx,
+    );
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'step-finish', payload: { stepResult: { reason: 'tool-calls' } } }),
+      ctx,
+    );
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'tripwire', payload: { reason: 'blocked before the next step', retry: false } }),
+      ctx,
+    );
+
+    expect(events.some(event => event.type === 'step_rejected')).toBe(false);
+    expect(state.currentMessage.content.parts).toEqual([{ type: 'text', text: 'accepted answer' }]);
+  });
+
+  it('Given a subscribed thread retry, Then the shared run engine publishes only the accepted step', async () => {
+    const { engine, events, session } = createHarness();
+    const subscription = {
+      stream: (async function* () {
+        yield chunk({ type: 'step-start', payload: {} });
+        yield chunk({ type: 'text-start', payload: { id: 'rejected' } });
+        yield chunk({ type: 'text-delta', payload: { id: 'rejected', text: 'rejected answer' } });
+        yield chunk({ type: 'tripwire', payload: { reason: 'retry', retry: true } });
+        yield chunk({ type: 'step-start', payload: {} });
+        yield chunk({ type: 'text-start', payload: { id: 'accepted' } });
+        yield chunk({ type: 'text-delta', payload: { id: 'accepted', text: 'accepted answer' } });
+        yield chunk({ type: 'finish', payload: { stepResult: { reason: 'stop' } } });
+      })(),
+      activeRunId: () => 'run-1',
+      abort: () => true,
+      unsubscribe: vi.fn(),
+    };
+    session.stream.attach({ subscription, key: 'thread-1' });
+
+    await engine.processSubscribedThreadStream(subscription);
+
+    const messageEnd = events.find(
+      (event): event is Extract<AgentControllerEvent, { type: 'message_end' }> => event.type === 'message_end',
+    );
+    expect(messageEnd?.message.content.parts).toEqual([{ type: 'text', text: 'accepted answer' }]);
+    expect(JSON.stringify(messageEnd?.message.content)).not.toContain('rejected answer');
+    expect(events).toContainEqual({ type: 'agent_end', reason: 'complete' });
+  });
 });

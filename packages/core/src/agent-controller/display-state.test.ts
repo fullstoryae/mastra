@@ -200,6 +200,34 @@ describe('message streaming', () => {
     emit(session, { type: 'message_end', message: msg2 as any });
     expect(session.displayState.get().currentMessage).toBe(msg2);
   });
+
+  it("restores a rejected step and removes only that step's tool state", () => {
+    const acceptedMessage = {
+      id: 'm1',
+      role: 'assistant' as const,
+      content: { format: 2 as const, parts: [{ type: 'text' as const, text: 'accepted' }] },
+      createdAt: new Date(),
+    };
+
+    emit(session, { type: 'message_update', message: msg2 as any });
+    emit(session, { type: 'tool_start', toolCallId: 'accepted-tool', toolName: 'read', args: {} });
+    emit(session, { type: 'tool_end', toolCallId: 'accepted-tool', result: 'ok', isError: false });
+    emit(session, { type: 'tool_input_start', toolCallId: 'rejected-tool', toolName: 'write' });
+    emit(session, { type: 'tool_input_delta', toolCallId: 'rejected-tool', argsTextDelta: '{"value":true}' });
+    emit(session, { type: 'tool_start', toolCallId: 'rejected-tool', toolName: 'write', args: { value: true } });
+
+    emit(session, {
+      type: 'step_rejected',
+      message: acceptedMessage,
+      toolCallIds: ['rejected-tool'],
+    });
+
+    const displayState = session.displayState.get();
+    expect(displayState.currentMessage).toBe(acceptedMessage);
+    expect(displayState.activeTools.get('accepted-tool')).toMatchObject({ status: 'completed', result: 'ok' });
+    expect(displayState.activeTools.has('rejected-tool')).toBe(false);
+    expect(displayState.toolInputBuffers.has('rejected-tool')).toBe(false);
+  });
 });
 
 // ===========================================================================

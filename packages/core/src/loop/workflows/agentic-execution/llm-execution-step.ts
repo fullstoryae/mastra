@@ -5,6 +5,7 @@ import { APICallError, generateId } from '@internal/ai-sdk-v5';
 import type { CallSettings, StepResult, ToolChoice, ToolSet } from '@internal/ai-sdk-v5';
 import type { StructuredOutputOptions } from '../../../agent';
 import type { MessageList } from '../../../agent/message-list';
+import type { MastraDBMessage } from '../../../agent/message-list/state/types';
 import { TripWire } from '../../../agent/trip-wire';
 import { isSupportedLanguageModel, supportedLanguageModelSpecifications } from '../../../agent/utils';
 import { getErrorFromUnknown } from '../../../error/utils.js';
@@ -104,6 +105,35 @@ import type { ToolCallForeachOptions } from './tool-call-concurrency';
  *   refusal, so the run would hang indefinitely.
  */
 const TERMINAL_FINISH_REASONS = ['stop', 'error', 'length', 'content-filter'];
+
+type ResponseMessageCheckpoint = {
+  messageId: string;
+  message?: MastraDBMessage;
+};
+
+function checkpointResponseMessage(messageList: MessageList, messageId: string): ResponseMessageCheckpoint {
+  const message = messageList.get.all.db().find(candidate => candidate.id === messageId);
+  return {
+    messageId,
+    message: message ? structuredClone(message) : undefined,
+  };
+}
+
+function restoreResponseMessage(messageList: MessageList, checkpoint: ResponseMessageCheckpoint): void {
+  const current = messageList.get.all.db().find(message => message.id === checkpoint.messageId);
+
+  if (!checkpoint.message) {
+    messageList.removeByIds([checkpoint.messageId]);
+    return;
+  }
+
+  const restored = structuredClone(checkpoint.message);
+  if (current) {
+    Object.assign(current, restored);
+  } else {
+    messageList.add(restored, 'response');
+  }
+}
 
 function getRequestInputProcessors({
   inputProcessors,
@@ -1131,6 +1161,7 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
       let currentMessageId = inputData.isTaskCompleteCheckFailed
         ? `${messageIdPassed}-${currentIteration}`
         : inputData.messageId || messageIdPassed;
+      let responseMessageCheckpoint: ResponseMessageCheckpoint | undefined;
       // Start the MODEL_STEP span at the beginning of LLM execution
       modelSpanTracker?.startStep();
 
@@ -1626,6 +1657,10 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
           throw new Error(
             `Unsupported model version: ${(currentStep.model as { specificationVersion?: string }).specificationVersion}. Supported versions: ${supportedLanguageModelSpecifications.join(', ')}`,
           );
+        }
+
+        if (!responseMessageCheckpoint || responseMessageCheckpoint.messageId !== currentStep.messageId) {
+          responseMessageCheckpoint = checkpointResponseMessage(messageList, currentStep.messageId);
         }
 
         const outputStream = new MastraModelOutput<OUTPUT>({
@@ -2269,11 +2304,10 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
         }),
       );
 
-      // Remove rejected response messages from the messageList before the next iteration.
-      // Without this, the LLM sees the rejected assistant response in its prompt on retry,
-      // which confuses models and often causes empty text responses.
       if (shouldRetry) {
-        messageList.removeByIds([outputStream.messageId]);
+        // A response message can contain accepted tool work from earlier steps.
+        // Restore the pre-step snapshot so only the rejected attempt is removed.
+        restoreResponseMessage(messageList, responseMessageCheckpoint ?? { messageId: outputStream.messageId });
       }
 
       const retryFeedbackText =

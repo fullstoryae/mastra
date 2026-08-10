@@ -45,11 +45,9 @@ type StreamIgnoredChunk =
   | StreamPayloadChunk<'source'>
   | StreamPayloadChunk<'file'>
   | StreamPayloadChunk<'raw'>
-  | StreamPayloadChunk<'step-start'>
   | StreamPayloadChunk<'tool-output'>
   | StreamPayloadChunk<'step-output'>
   | StreamPayloadChunk<'watch'>
-  | StreamPayloadChunk<'tripwire'>
   | StreamPayloadChunk<'is-task-complete'>
   | StreamPayloadChunk<'background-task-started'>
   | StreamPayloadChunk<'background-task-completed'>
@@ -64,6 +62,8 @@ type StreamIgnoredChunk =
   | StreamObjectChunk<'object-result'>;
 type StreamChunk =
   | StreamIgnoredChunk
+  | StreamPayloadChunk<'step-start'>
+  | StreamPayloadChunk<'tripwire'>
   | StreamPayloadChunk<'text-start'>
   | StreamPayloadChunk<'text-delta'>
   | StreamPayloadChunk<'reasoning-start'>
@@ -181,13 +181,24 @@ function formatToolProgressOutput(progress: unknown): string {
   return parts.length > 0 ? `${parts.join(': ')}\n` : `${JSON.stringify(progress)}\n`;
 }
 
+type StreamContentState = { index: number; text: string };
+
+type StreamStepCheckpoint = {
+  currentMessage: MastraDBMessage;
+  textContentById: Map<string, StreamContentState>;
+  thinkingContentById: Map<string, StreamContentState>;
+  toolPartById: Map<string, number>;
+};
+
 type StreamState = {
   currentMessage: MastraDBMessage;
   lastFinishedMessage?: MastraDBMessage;
   isSuspended: boolean;
-  textContentById: Map<string, { index: number; text: string }>;
-  thinkingContentById: Map<string, { index: number; text: string }>;
+  textContentById: Map<string, StreamContentState>;
+  thinkingContentById: Map<string, StreamContentState>;
   toolPartById: Map<string, number>;
+  stepCheckpoint?: StreamStepCheckpoint;
+  currentStepToolCallIds: Set<string>;
   /**
    * Set when a stream ends on a non-success finish reason (e.g. `content-filter`,
    * `error`, `length`). Carries the user-facing message so the run finalizes
@@ -271,6 +282,39 @@ export class SessionRunEngine {
     return { ...message, content: structuredClone(message.content) };
   }
 
+  private cloneContentState(source: Map<string, StreamContentState>): Map<string, StreamContentState> {
+    return new Map([...source].map(([id, value]) => [id, { ...value }]));
+  }
+
+  private checkpointCurrentStep(state: StreamState): void {
+    state.stepCheckpoint = {
+      currentMessage: this.cloneMessage(state.currentMessage),
+      textContentById: this.cloneContentState(state.textContentById),
+      thinkingContentById: this.cloneContentState(state.thinkingContentById),
+      toolPartById: new Map(state.toolPartById),
+    };
+    state.currentStepToolCallIds.clear();
+  }
+
+  private rejectCurrentStep(state: StreamState): void {
+    const checkpoint = state.stepCheckpoint;
+    if (!checkpoint) return;
+
+    const toolCallIds = [...state.currentStepToolCallIds];
+    state.currentMessage = checkpoint.currentMessage;
+    state.textContentById = checkpoint.textContentById;
+    state.thinkingContentById = checkpoint.thinkingContentById;
+    state.toolPartById = checkpoint.toolPartById;
+    state.stepCheckpoint = undefined;
+    state.currentStepToolCallIds.clear();
+
+    this.#session.emit({
+      type: 'step_rejected',
+      message: this.cloneMessage(state.currentMessage),
+      toolCallIds,
+    });
+  }
+
   private setStopReason(message: MastraDBMessage, stopReason: string, force = false): void {
     message.content.metadata ??= {};
     const metadata = message.content.metadata;
@@ -301,9 +345,10 @@ export class SessionRunEngine {
     return {
       currentMessage: this.createEmptyAssistantMessage(),
       isSuspended: false,
-      textContentById: new Map<string, { index: number; text: string }>(),
-      thinkingContentById: new Map<string, { index: number; text: string }>(),
+      textContentById: new Map<string, StreamContentState>(),
+      thinkingContentById: new Map<string, StreamContentState>(),
       toolPartById: new Map<string, number>(),
+      currentStepToolCallIds: new Set<string>(),
     };
   }
 
@@ -389,6 +434,14 @@ export class SessionRunEngine {
     }
 
     switch (chunk.type) {
+      case 'step-start':
+        this.checkpointCurrentStep(state);
+        break;
+
+      case 'tripwire':
+        this.rejectCurrentStep(state);
+        break;
+
       case 'text-start': {
         const textIndex = state.currentMessage.content.parts.length;
         state.currentMessage.content.parts.push({ type: 'text', text: '' });
@@ -436,6 +489,7 @@ export class SessionRunEngine {
         const payload = getPayload(chunk);
         const toolCallId = getString(payload.toolCallId) ?? '';
         const toolName = getString(payload.toolName) ?? '';
+        if (toolCallId) state.currentStepToolCallIds.add(toolCallId);
         this.#session.emit({ type: 'tool_input_start', toolCallId, toolName });
         break;
       }
@@ -468,6 +522,7 @@ export class SessionRunEngine {
         const toolCallId = getString(toolCall.toolCallId) ?? '';
         const toolName = getString(toolCall.toolName) ?? '';
         const args = getDisplayTransform(chunk.metadata, 'input-available', toolCall.args);
+        if (toolCallId) state.currentStepToolCallIds.add(toolCallId);
         const toolIndex = state.currentMessage.content.parts.length;
         state.currentMessage.content.parts.push({
           type: 'tool-invocation',
@@ -645,7 +700,8 @@ export class SessionRunEngine {
       }
 
       case 'step-finish': {
-        const usage = getRecord(getPayload(chunk).output)?.usage;
+        const payload = getPayload(chunk);
+        const usage = getRecord(payload.output)?.usage;
         const usageRecord = getRecord(usage);
         if (usageRecord) {
           const promptTokens =
@@ -673,6 +729,13 @@ export class SessionRunEngine {
 
           this.#machinery.persistTokenUsage().catch(() => {});
           this.#session.emit({ type: 'usage_update', usage: stepUsage });
+        }
+        const stepReason = getString(getRecord(payload.stepResult)?.reason);
+        if (stepReason === 'retry' || stepReason === 'tripwire') {
+          this.rejectCurrentStep(state);
+        } else {
+          state.stepCheckpoint = undefined;
+          state.currentStepToolCallIds.clear();
         }
         break;
       }

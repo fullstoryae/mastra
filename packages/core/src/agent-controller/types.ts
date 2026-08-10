@@ -758,6 +758,7 @@ export type AgentControllerEvent =
   | { type: 'message_start'; message: MastraDBMessage }
   | { type: 'message_update'; message: MastraDBMessage }
   | { type: 'message_end'; message: MastraDBMessage }
+  | { type: 'step_rejected'; message: MastraDBMessage; toolCallIds: string[] }
   | { type: 'tool_start'; toolCallId: string; toolName: string; args: unknown }
   | { type: 'tool_approval_required'; toolCallId: string; toolName: string; args: unknown }
   | {

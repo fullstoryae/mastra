@@ -2170,6 +2170,14 @@ export class SessionDisplayState {
         ds.currentMessage = event.message;
         break;
 
+      case 'step_rejected':
+        ds.currentMessage = event.message;
+        for (const toolCallId of event.toolCallIds) {
+          ds.activeTools.delete(toolCallId);
+          ds.toolInputBuffers.delete(toolCallId);
+        }
+        break;
+
       // ── Tool lifecycle ─────────────────────────────────────────────────
       case 'tool_input_start': {
         ds.toolInputBuffers.set(event.toolCallId, { text: '', toolName: event.toolName });
