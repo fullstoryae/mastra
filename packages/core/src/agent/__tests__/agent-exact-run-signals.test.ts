@@ -1,3 +1,8 @@
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
+import { createInterface } from 'node:readline';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { EventEmitterPubSub } from '../../events/event-emitter';
@@ -23,6 +28,21 @@ function createActiveOutput(runId: string) {
 
 async function nextTick() {
   await new Promise(resolve => setTimeout(resolve, 0));
+}
+
+function waitForMessage(child: ReturnType<typeof spawn>, expectedType: string) {
+  const lines = createInterface({ input: child.stdout! });
+  return new Promise<Record<string, any>>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`Timed out waiting for Redis fixture ${expectedType}`)), 10_000);
+    const onLine = (line: string) => {
+      const message = JSON.parse(line) as Record<string, any>;
+      if (message.type !== expectedType) return;
+      clearTimeout(timeout);
+      lines.off('line', onLine);
+      resolve(message);
+    };
+    lines.on('line', onLine);
+  });
 }
 
 describe('exact-run signals', () => {
@@ -103,6 +123,51 @@ describe('exact-run signals', () => {
     ownerSubscription.unsubscribe();
     senderSubscription.unsubscribe();
   });
+
+  const redisIt = process.env.AGENT_REDIS_URL && process.env.MASTRA_REDIS_STREAMS_MODULE_PATH ? it : it.skip;
+
+  redisIt(
+    'acknowledges exact delivery across two Redis-backed processes',
+    async () => {
+      const fixture = new URL('./fixtures/exact-run-redis-process.ts', import.meta.url);
+      const env = {
+        ...process.env,
+        MASTRA_EXACT_RUN_REDIS_PREFIX: `fullstory:test:exact-run:${randomUUID()}:`,
+      };
+      const spawnFixture = (role: 'owner' | 'sender') =>
+        spawn(process.execPath, ['--import', 'tsx', fixture.pathname, role], {
+          env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      const owner = spawnFixture('owner');
+      const ownerExit = once(owner, 'exit');
+
+      try {
+        await waitForMessage(owner, 'ready');
+        const sender = spawnFixture('sender');
+        const senderExit = once(sender, 'exit');
+        const accepted = await waitForMessage(sender, 'accepted');
+        const [senderExitCode] = await senderExit;
+        expect(senderExitCode).toBe(0);
+        expect(accepted.first).toMatchObject({ accepted: true, runId: 'redis-run', signalId: 'redis-signal' });
+        expect(accepted.duplicate).toEqual(accepted.first);
+        expect(accepted.streamCalls).toBe(0);
+
+        owner.stdin!.write('drain\n');
+        const result = await waitForMessage(owner, 'result');
+        const [ownerExitCode] = await ownerExit;
+        expect(ownerExitCode).toBe(0);
+        expect(result).toMatchObject({
+          signalIds: ['redis-signal'],
+          contents: ['steer across processes'],
+          streamCalls: 0,
+        });
+      } finally {
+        owner.kill();
+      }
+    },
+    20_000,
+  );
 
   it('rejects idle and mismatched targets without starting another run', async () => {
     const pubsub = new EventEmitterPubSub();
