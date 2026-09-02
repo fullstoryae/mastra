@@ -10,6 +10,7 @@ import type {
   SendAgentSignalAccepted,
   ToolsetsInput,
 } from '../agent/types';
+import { ExactRunSignalError } from '../agent/types';
 import { getErrorFromUnknown } from '../error';
 import type { MastraModelGatewayInterface } from '../llm/model/gateways';
 import { ModelRouterLanguageModel } from '../llm/model/router';
@@ -3166,6 +3167,27 @@ export class Session<TState = unknown> {
     });
 
     return { id: signal.id, type: signal.type, accepted };
+  }
+
+  /**
+   * Deliver a user message to one exact active run. This strict path never
+   * wakes an idle thread and never substitutes a different run.
+   */
+  async sendSignalToRun(input: {
+    id: string;
+    content: AgentSignalContents;
+    expectedRunId: string;
+  }): Promise<{ accepted: true; runId: string; signalId: string }> {
+    const threadId = this.thread.getId();
+    if (!threadId) {
+      throw new ExactRunSignalError({ code: 'no-active-run', expectedRunId: input.expectedRunId });
+    }
+    const agent = this.machinery.getAgent();
+    await this.thread.ensureSubscription(threadId);
+    return agent.sendSignalToRun(input, {
+      resourceId: this.identity.getResourceId(),
+      threadId,
+    });
   }
 
   /**

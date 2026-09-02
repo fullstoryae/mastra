@@ -20,6 +20,7 @@ import type {
   AgentSignal,
   AgentSubscribeToThreadOptions,
   AgentThreadSubscription,
+  SendSignalToRunAccepted,
   QueueAgentMessageOptions,
   QueueAgentMessageResult,
   SendAgentMessageOptions,
@@ -30,6 +31,7 @@ import type {
   SendAgentStateSignalOptions,
   SendAgentStateSignalResult,
 } from './types';
+import { ExactRunSignalError } from './types';
 
 const AGENT_THREAD_KEY_SEPARATOR = '\u0000';
 const AGENT_THREAD_STREAM_TOPIC_PREFIX = 'agent.thread-stream';
@@ -59,6 +61,7 @@ const AGENT_THREAD_LEASE_RENEW_INTERVAL_MS = readPositiveIntEnv(
  * can shed it sooner; 30 minute default.
  */
 const AGENT_SUSPENDED_RUN_TTL_MS = readPositiveIntEnv('MASTRA_SUSPENDED_RUN_TTL_MS', 30 * 60 * 1000);
+const EXACT_RUN_SIGNAL_DELIVERY_TIMEOUT_MS = readPositiveIntEnv('MASTRA_EXACT_RUN_SIGNAL_TIMEOUT_MS', 5_000);
 
 export let defaultAgentThreadPubSub: PubSub = new EventEmitterPubSub();
 
@@ -145,6 +148,8 @@ type AgentThreadRuntimeState = {
    * if `activeThreadRunIds` is rotated by a follow-up signal.
    */
   leaseRenewalTimers: Map<string, ReturnType<typeof setInterval>>;
+  acceptedExactSignalIdsByRun: Map<string, Set<string>>;
+  terminalRunIds: Set<string>;
 };
 
 export type AgentThreadState = 'active' | 'idle';
@@ -159,7 +164,23 @@ type AgentThreadStreamRuntimeEvent =
   | { type: 'run-abort-requested'; runId: string; streamId: string }
   | { type: 'run-aborted'; runId: string; streamId?: string }
   | { type: 'run-failed'; runId: string; streamId?: string; error: string }
-  | { type: 'signal-enqueued'; runId: string; signal: SerializableAgentSignal; sourceId: string; preRun?: boolean };
+  | { type: 'signal-enqueued'; runId: string; signal: SerializableAgentSignal; sourceId: string; preRun?: boolean }
+  | {
+      type: 'exact-signal-request';
+      runId: string;
+      signal: SerializableAgentSignal;
+      sourceId: string;
+      replyTopic: string;
+    };
+
+type ExactRunSignalReply =
+  | { type: 'exact-signal-accepted'; runId: string; signalId: string }
+  | {
+      type: 'exact-signal-rejected';
+      runId: string;
+      signalId: string;
+      reason: 'not-steerable' | 'terminal-run' | 'coordination-unavailable';
+    };
 
 function createRuntimeState(): AgentThreadRuntimeState {
   return {
@@ -181,6 +202,8 @@ function createRuntimeState(): AgentThreadRuntimeState {
     preparedRunsById: new Map(),
     abortedRunIds: new Set(),
     leaseRenewalTimers: new Map(),
+    acceptedExactSignalIdsByRun: new Map(),
+    terminalRunIds: new Set(),
   };
 }
 
@@ -226,6 +249,12 @@ export class AgentThreadStreamRuntime {
       .getLeaseOwner(key)
       .then(owner => owner === runId)
       .catch(() => false);
+  }
+
+  async #renewExactRunLease(pubsub: PubSub, key: string, runId: string): Promise<boolean> {
+    const { provider, isFallback } = this.#resolveLeaseProvider(pubsub);
+    if (isFallback) return true;
+    return provider.renewLease(key, runId, AGENT_THREAD_LEASE_TTL_MS);
   }
 
   #getSourceId(): string {
@@ -415,6 +444,153 @@ export class AgentThreadStreamRuntime {
 
   #serializeSignal(signal: CreatedAgentSignal): SerializableAgentSignal {
     return signal;
+  }
+
+  #markTerminalRun(state: AgentThreadRuntimeState, runId: string) {
+    state.terminalRunIds.add(runId);
+    state.acceptedExactSignalIdsByRun.delete(runId);
+    while (state.terminalRunIds.size > 1_000) {
+      const oldest = state.terminalRunIds.values().next().value;
+      if (oldest === undefined) break;
+      state.terminalRunIds.delete(oldest);
+    }
+  }
+
+  #discardUndrainedExactSignals(state: AgentThreadRuntimeState, key: string, runId: string) {
+    const strictIds = state.acceptedExactSignalIdsByRun.get(runId);
+    if (!strictIds?.size) return;
+    const queue = state.pendingSignalsByThread.get(key);
+    if (!queue?.length) return;
+    const remaining = queue.filter(signal => !strictIds.has(signal.id));
+    if (remaining.length) state.pendingSignalsByThread.set(key, remaining);
+    else state.pendingSignalsByThread.delete(key);
+  }
+
+  #queueExactSignal(
+    state: AgentThreadRuntimeState,
+    key: string,
+    runId: string,
+    signal: CreatedAgentSignal,
+    pubsub?: PubSub,
+  ): 'accepted' | 'duplicate' | 'not-steerable' | 'terminal-run' {
+    if (state.terminalRunIds.has(runId)) return 'terminal-run';
+    const record = state.threadRunsById.get(runId);
+    if (!record || state.threadKeysByRunId.get(runId) !== key) return 'not-steerable';
+    if (!this.#isThreadBlockingRun(state, record)) return 'terminal-run';
+
+    const acceptedIds = state.acceptedExactSignalIdsByRun.get(runId) ?? new Set<string>();
+    state.acceptedExactSignalIdsByRun.set(runId, acceptedIds);
+    if (acceptedIds.has(signal.id)) return 'duplicate';
+
+    const queue = state.pendingSignalsByThread.get(key) ?? [];
+    queue.push(signal);
+    state.pendingSignalsByThread.set(key, queue);
+    acceptedIds.add(signal.id);
+    this.#watchThreadRunCompletion(state, pubsub, key, record);
+    return 'accepted';
+  }
+
+  async sendSignalToRun(
+    agent: Agent<any, any, any, any>,
+    input: { id: string; content: AgentSignal['contents']; expectedRunId: string },
+    target: { resourceId: string; threadId: string; timeoutMs?: number },
+    pubsub?: PubSub,
+  ): Promise<SendSignalToRunAccepted> {
+    const resolvedPubSub = this.#getPubSub(pubsub);
+    const state = this.#getState(resolvedPubSub);
+    const key = this.#threadKey(target.resourceId, target.threadId);
+    const expectedRunId = input.expectedRunId;
+    const localActiveRunId = state.activeThreadRunIds.get(key);
+    const { provider, isFallback } = this.#resolveLeaseProvider(resolvedPubSub);
+    let actualRunId: string | undefined;
+    if (isFallback) {
+      actualRunId = localActiveRunId;
+    } else {
+      try {
+        actualRunId = await provider.getLeaseOwner(key);
+      } catch {
+        throw new ExactRunSignalError({ code: 'coordination-unavailable', expectedRunId });
+      }
+    }
+
+    if (state.terminalRunIds.has(expectedRunId)) {
+      throw new ExactRunSignalError({ code: 'terminal-run', expectedRunId });
+    }
+    if (!actualRunId) {
+      throw new ExactRunSignalError({ code: 'no-active-run', expectedRunId });
+    }
+    if (actualRunId !== expectedRunId) {
+      throw new ExactRunSignalError({ code: 'run-mismatch', expectedRunId, actualRunId });
+    }
+    const signal = createSignal({
+      id: input.id,
+      type: 'user',
+      tagName: 'user',
+      contents: input.content,
+      acceptedAt: new Date(),
+    });
+    const localRecord = state.threadRunsById.get(expectedRunId);
+    if (localRecord && state.threadKeysByRunId.get(expectedRunId) === key) {
+      if (localRecord.agent.id !== agent.id) {
+        throw new ExactRunSignalError({ code: 'not-steerable', expectedRunId });
+      }
+      let ownsLease: boolean;
+      try {
+        ownsLease = await this.#renewExactRunLease(resolvedPubSub, key, expectedRunId);
+      } catch {
+        throw new ExactRunSignalError({ code: 'coordination-unavailable', expectedRunId });
+      }
+      if (!ownsLease) {
+        throw new ExactRunSignalError({ code: 'not-steerable', expectedRunId });
+      }
+      const decision = this.#queueExactSignal(state, key, expectedRunId, signal, resolvedPubSub);
+      if (decision === 'terminal-run') {
+        throw new ExactRunSignalError({ code: 'terminal-run', expectedRunId });
+      }
+      if (decision === 'not-steerable') {
+        throw new ExactRunSignalError({ code: 'not-steerable', expectedRunId });
+      }
+      return { accepted: true, runId: expectedRunId, signalId: signal.id };
+    }
+
+    const replyTopic = `${this.#threadTopic(key)}.exact-signal-reply.${randomUUID()}`;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let subscribed = false;
+    let resolveReply!: (reply: ExactRunSignalReply) => void;
+    const replyPromise = new Promise<ExactRunSignalReply>(resolve => {
+      resolveReply = resolve;
+    });
+    const onReply: EventCallback = event => {
+      const reply = event.data as ExactRunSignalReply | undefined;
+      if (reply?.runId === expectedRunId && reply.signalId === signal.id) resolveReply(reply);
+    };
+
+    try {
+      await resolvedPubSub.subscribe(replyTopic, onReply);
+      subscribed = true;
+      const deliveryTimeout = new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new ExactRunSignalError({ code: 'delivery-timeout', expectedRunId })),
+          target.timeoutMs ?? EXACT_RUN_SIGNAL_DELIVERY_TIMEOUT_MS,
+        );
+      });
+      await this.#publishAndWait(resolvedPubSub, key, {
+        type: 'exact-signal-request',
+        runId: expectedRunId,
+        signal: this.#serializeSignal(signal),
+        sourceId: this.#getSourceId(),
+        replyTopic,
+      });
+      const reply = await Promise.race([replyPromise, deliveryTimeout]);
+      if (reply.type === 'exact-signal-rejected') {
+        throw new ExactRunSignalError({ code: reply.reason, expectedRunId });
+      }
+      return { accepted: true, runId: expectedRunId, signalId: signal.id };
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (subscribed) await resolvedPubSub.unsubscribe(replyTopic, onReply).catch(() => {});
+      void resolvedPubSub.clearTopic(replyTopic).catch(() => {});
+    }
   }
 
   #nextStreamIdentity(state: AgentThreadRuntimeState, runId: string) {
@@ -767,6 +943,8 @@ export class AgentThreadStreamRuntime {
     state.watchedThreadStreamIds.clear();
     state.preparedRunsById.clear();
     state.abortedRunIds.clear();
+    state.acceptedExactSignalIdsByRun.clear();
+    state.terminalRunIds.clear();
   }
 
   #cleanupPreparedRun(state: AgentThreadRuntimeState, runId: string) {
@@ -1038,6 +1216,11 @@ export class AgentThreadStreamRuntime {
       }
 
       record.lifecycle = 'completed';
+      // Exact-run signals belong only to this run. If the run reaches a
+      // terminal boundary before its loop drains one, never turn that signal
+      // into the first input of a replacement run.
+      this.#discardUndrainedExactSignals(state, key, record.runId);
+      this.#markTerminalRun(state, record.runId);
       this.#clearSuspendedRun(state, record.runId);
       state.threadRunsByStreamId.delete(record.streamId);
       if (state.threadRunsById.get(record.runId) === record) {
@@ -1661,6 +1844,33 @@ export class AgentThreadStreamRuntime {
         signalsByThread.set(key, queue);
         return;
       }
+      if (data.type === 'exact-signal-request') {
+        const localRecord = state.threadRunsById.get(data.runId);
+        if (!localRecord || state.threadKeysByRunId.get(data.runId) !== key) return;
+        const signal = createSignal(data.signal);
+        let decision: 'accepted' | 'duplicate' | 'not-steerable' | 'terminal-run' | 'coordination-unavailable';
+        if (localRecord.agent.id !== agent.id) {
+          decision = 'not-steerable';
+        } else {
+          try {
+            decision = (await this.#renewExactRunLease(resolvedPubSub, key, data.runId))
+              ? this.#queueExactSignal(state, key, data.runId, signal, resolvedPubSub)
+              : 'not-steerable';
+          } catch {
+            decision = 'coordination-unavailable';
+          }
+        }
+        const reply: ExactRunSignalReply =
+          decision === 'accepted' || decision === 'duplicate'
+            ? { type: 'exact-signal-accepted', runId: data.runId, signalId: signal.id }
+            : { type: 'exact-signal-rejected', runId: data.runId, signalId: signal.id, reason: decision };
+        await resolvedPubSub.publish(data.replyTopic, {
+          type: reply.type,
+          runId: data.runId,
+          data: reply,
+        });
+        return;
+      }
       if (data.type === 'run-abort-requested') {
         if (
           state.preparedRunsById.has(data.runId) &&
@@ -1674,6 +1884,8 @@ export class AgentThreadStreamRuntime {
         return;
       }
       if (data.type === 'run-failed') {
+        this.#discardUndrainedExactSignals(state, key, data.runId);
+        this.#markTerminalRun(state, data.runId);
         const eventStreamId = data.streamId ?? data.runId;
         clearActiveIfCurrent(data.runId, data.streamId);
         let errorRun: AgentThreadRunRecord<any> | undefined;
@@ -1702,6 +1914,7 @@ export class AgentThreadStreamRuntime {
           const record = state.threadRunsByStreamId.get(eventStreamId) ?? state.threadRunsById.get(data.runId);
           if (record) record.lifecycle = 'suspended';
         } else {
+          this.#markTerminalRun(state, data.runId);
           clearActiveIfCurrent(data.runId, data.streamId);
         }
         if (data.type !== 'run-suspended') {

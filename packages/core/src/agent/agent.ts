@@ -8039,6 +8039,22 @@ export class Agent<
     );
   }
 
+  /**
+   * Deliver a user signal to one exact active run without waking the thread or
+   * substituting a newer run.
+   */
+  sendSignalToRun(
+    input: { id: string; content: AgentSignal['contents']; expectedRunId: string },
+    target: { resourceId: string; threadId: string; timeoutMs?: number },
+  ) {
+    return agentThreadStreamRuntime.sendSignalToRun(
+      this as Agent<any, any, any, any>,
+      input,
+      target,
+      this.getPubSub(),
+    );
+  }
+
   async stream<
     OUTPUT extends StandardSchemaWithJSON<any, any>,
     T extends InferStandardSchemaOutput<OUTPUT> = InferStandardSchemaOutput<OUTPUT>,

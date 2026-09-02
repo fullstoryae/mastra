@@ -65,7 +65,7 @@ import type { SkillFormat } from '../workspace/skills';
 import type { Agent } from './agent';
 import type { AgentExecutionOptions, NetworkOptions } from './agent.types';
 import type { MessageList } from './message-list/index';
-import type { AgentSignalAttributes, CreatedAgentSignal } from './signals';
+import type { AgentSignalAttributes, AgentSignalContents, CreatedAgentSignal } from './signals';
 import type { SubAgent } from './subagent';
 export type {
   MastraDBMessage,
@@ -228,6 +228,58 @@ export interface SendAgentSignalResult<OUTPUT = unknown> {
   /** Resolves when a `persist` behavior finishes writing the signal to memory. */
   persisted?: Promise<void>;
 }
+
+/**
+ * Machine-readable reasons that an exact-run signal was not accepted.
+ *
+ * Unlike `sendSignal`, exact-run delivery never wakes an idle thread and never
+ * substitutes a different active run.
+ */
+export type ExactRunSignalErrorCode =
+  | 'no-active-run'
+  | 'run-mismatch'
+  | 'not-steerable'
+  | 'terminal-run'
+  | 'coordination-unavailable'
+  | 'delivery-timeout';
+
+export class ExactRunSignalError extends Error {
+  readonly code: ExactRunSignalErrorCode;
+  readonly expectedRunId: string;
+  readonly actualRunId?: string;
+
+  constructor({
+    code,
+    expectedRunId,
+    actualRunId,
+  }: {
+    code: ExactRunSignalErrorCode;
+    expectedRunId: string;
+    actualRunId?: string;
+  }) {
+    super(
+      code === 'run-mismatch'
+        ? `Expected active run ${expectedRunId}, but found ${actualRunId ?? 'none'}`
+        : `Exact-run signal rejected: ${code} (${expectedRunId})`,
+    );
+    this.name = 'ExactRunSignalError';
+    this.code = code;
+    this.expectedRunId = expectedRunId;
+    this.actualRunId = actualRunId;
+  }
+}
+
+export type SendSignalToRunInput = {
+  id: string;
+  content: AgentSignalContents;
+  expectedRunId: string;
+};
+
+export type SendSignalToRunAccepted = {
+  accepted: true;
+  runId: string;
+  signalId: string;
+};
 
 /**
  * @experimental Agent message APIs are experimental and may change in a future release.
