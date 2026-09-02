@@ -20,10 +20,33 @@ function createAgentMock(activeRunId: () => string | null) {
       accepted: Promise.resolve({ action: 'deliver' as const, runId: 'run-1' }),
       signal,
     })),
+    sendSignalToRun: vi.fn(async input => ({ accepted: true as const, runId: input.expectedRunId, signalId: input.id })),
   };
 }
 
 describe('AgentController signal messages', () => {
+  it('delegates exact-run steering without using the general wake-capable signal path', async () => {
+    const agent = createAgentMock(() => 'run-1');
+    const controller = new AgentController({
+      workspace: createMockWorkspace(),
+      id: 'controller-exact-run',
+      resourceId: 'resource-1',
+      modes: [{ id: 'default', name: 'Default', default: true, agent: agent as any }],
+    });
+    await controller.init();
+    const session = await controller.createSession({ id: 'test-session', ownerId: 'test-owner' });
+    const threadId = session.thread.getId()!;
+
+    await expect(
+      session.sendSignalToRun({ id: 'signal-1', content: 'steer', expectedRunId: 'run-1' }),
+    ).resolves.toEqual({ accepted: true, runId: 'run-1', signalId: 'signal-1' });
+    expect(agent.sendSignalToRun).toHaveBeenCalledWith(
+      { id: 'signal-1', content: 'steer', expectedRunId: 'run-1' },
+      { resourceId: 'resource-1', threadId },
+    );
+    expect(agent.sendSignal).not.toHaveBeenCalled();
+  });
+
   it('captures active signal intent before async acceptance can observe an idle subscription', async () => {
     let activeRunId: string | null = 'run-1';
     const agent = createAgentMock(() => activeRunId);
