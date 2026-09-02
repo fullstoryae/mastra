@@ -75,8 +75,10 @@ async function runOwner() {
 
 async function runSender() {
   const input = { id: 'redis-signal', content: 'steer across processes', expectedRunId: 'redis-run' };
-  const first = await runtime.sendSignalToRun(agent, input, target, pubsub);
-  const duplicate = await runtime.sendSignalToRun(agent, input, target, pubsub);
+  const [first, duplicate] = await Promise.all([
+    runtime.sendSignalToRun(agent, input, target, pubsub),
+    runtime.sendSignalToRun(agent, input, target, pubsub),
+  ]);
   writeMessage({ type: 'accepted', first, duplicate, streamCalls });
   await pubsub.close();
 }

@@ -240,6 +240,7 @@ export type ExactRunSignalErrorCode =
   | 'run-mismatch'
   | 'not-steerable'
   | 'terminal-run'
+  | 'coordination-unavailable'
   | 'delivery-timeout';
 
 export class ExactRunSignalError extends Error {

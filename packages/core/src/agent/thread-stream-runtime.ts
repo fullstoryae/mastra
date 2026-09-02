@@ -175,7 +175,12 @@ type AgentThreadStreamRuntimeEvent =
 
 type ExactRunSignalReply =
   | { type: 'exact-signal-accepted'; runId: string; signalId: string }
-  | { type: 'exact-signal-rejected'; runId: string; signalId: string; reason: 'not-steerable' | 'terminal-run' };
+  | {
+      type: 'exact-signal-rejected';
+      runId: string;
+      signalId: string;
+      reason: 'not-steerable' | 'terminal-run' | 'coordination-unavailable';
+    };
 
 function createRuntimeState(): AgentThreadRuntimeState {
   return {
@@ -244,6 +249,12 @@ export class AgentThreadStreamRuntime {
       .getLeaseOwner(key)
       .then(owner => owner === runId)
       .catch(() => false);
+  }
+
+  async #renewExactRunLease(pubsub: PubSub, key: string, runId: string): Promise<boolean> {
+    const { provider, isFallback } = this.#resolveLeaseProvider(pubsub);
+    if (isFallback) return true;
+    return provider.renewLease(key, runId, AGENT_THREAD_LEASE_TTL_MS);
   }
 
   #getSourceId(): string {
@@ -491,8 +502,16 @@ export class AgentThreadStreamRuntime {
     const expectedRunId = input.expectedRunId;
     const localActiveRunId = state.activeThreadRunIds.get(key);
     const { provider, isFallback } = this.#resolveLeaseProvider(resolvedPubSub);
-    const leaseOwner = isFallback ? undefined : await provider.getLeaseOwner(key).catch(() => undefined);
-    const actualRunId = leaseOwner ?? localActiveRunId;
+    let actualRunId: string | undefined;
+    if (isFallback) {
+      actualRunId = localActiveRunId;
+    } else {
+      try {
+        actualRunId = await provider.getLeaseOwner(key);
+      } catch {
+        throw new ExactRunSignalError({ code: 'coordination-unavailable', expectedRunId });
+      }
+    }
 
     if (state.terminalRunIds.has(expectedRunId)) {
       throw new ExactRunSignalError({ code: 'terminal-run', expectedRunId });
@@ -500,8 +519,8 @@ export class AgentThreadStreamRuntime {
     if (!actualRunId) {
       throw new ExactRunSignalError({ code: 'no-active-run', expectedRunId });
     }
-    if (actualRunId !== expectedRunId || (leaseOwner && leaseOwner !== expectedRunId)) {
-      throw new ExactRunSignalError({ code: 'run-mismatch', expectedRunId, actualRunId: leaseOwner ?? actualRunId });
+    if (actualRunId !== expectedRunId) {
+      throw new ExactRunSignalError({ code: 'run-mismatch', expectedRunId, actualRunId });
     }
     const signal = createSignal({
       id: input.id,
@@ -515,6 +534,15 @@ export class AgentThreadStreamRuntime {
       if (localRecord.agent.id !== agent.id) {
         throw new ExactRunSignalError({ code: 'not-steerable', expectedRunId });
       }
+      let ownsLease: boolean;
+      try {
+        ownsLease = await this.#renewExactRunLease(resolvedPubSub, key, expectedRunId);
+      } catch {
+        throw new ExactRunSignalError({ code: 'coordination-unavailable', expectedRunId });
+      }
+      if (!ownsLease) {
+        throw new ExactRunSignalError({ code: 'not-steerable', expectedRunId });
+      }
       const decision = this.#queueExactSignal(state, key, expectedRunId, signal, resolvedPubSub);
       if (decision === 'terminal-run') {
         throw new ExactRunSignalError({ code: 'terminal-run', expectedRunId });
@@ -525,7 +553,7 @@ export class AgentThreadStreamRuntime {
       return { accepted: true, runId: expectedRunId, signalId: signal.id };
     }
 
-    const replyTopic = `${this.#threadTopic(key)}.exact-signal-reply.${encodeURIComponent(signal.id)}`;
+    const replyTopic = `${this.#threadTopic(key)}.exact-signal-reply.${randomUUID()}`;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let subscribed = false;
     let resolveReply!: (reply: ExactRunSignalReply) => void;
@@ -1820,10 +1848,18 @@ export class AgentThreadStreamRuntime {
         const localRecord = state.threadRunsById.get(data.runId);
         if (!localRecord || state.threadKeysByRunId.get(data.runId) !== key) return;
         const signal = createSignal(data.signal);
-        const decision =
-          localRecord.agent.id === agent.id
-            ? this.#queueExactSignal(state, key, data.runId, signal, resolvedPubSub)
-            : 'not-steerable';
+        let decision: 'accepted' | 'duplicate' | 'not-steerable' | 'terminal-run' | 'coordination-unavailable';
+        if (localRecord.agent.id !== agent.id) {
+          decision = 'not-steerable';
+        } else {
+          try {
+            decision = (await this.#renewExactRunLease(resolvedPubSub, key, data.runId))
+              ? this.#queueExactSignal(state, key, data.runId, signal, resolvedPubSub)
+              : 'not-steerable';
+          } catch {
+            decision = 'coordination-unavailable';
+          }
+        }
         const reply: ExactRunSignalReply =
           decision === 'accepted' || decision === 'duplicate'
             ? { type: 'exact-signal-accepted', runId: data.runId, signalId: signal.id }
