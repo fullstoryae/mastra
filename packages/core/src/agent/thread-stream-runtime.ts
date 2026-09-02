@@ -492,18 +492,17 @@ export class AgentThreadStreamRuntime {
     const localActiveRunId = state.activeThreadRunIds.get(key);
     const { provider, isFallback } = this.#resolveLeaseProvider(resolvedPubSub);
     const leaseOwner = isFallback ? undefined : await provider.getLeaseOwner(key).catch(() => undefined);
-    const actualRunId = localActiveRunId ?? leaseOwner;
+    const actualRunId = leaseOwner ?? localActiveRunId;
 
+    if (state.terminalRunIds.has(expectedRunId)) {
+      throw new ExactRunSignalError({ code: 'terminal-run', expectedRunId });
+    }
     if (!actualRunId) {
       throw new ExactRunSignalError({ code: 'no-active-run', expectedRunId });
     }
     if (actualRunId !== expectedRunId || (leaseOwner && leaseOwner !== expectedRunId)) {
       throw new ExactRunSignalError({ code: 'run-mismatch', expectedRunId, actualRunId: leaseOwner ?? actualRunId });
     }
-    if (state.terminalRunIds.has(expectedRunId)) {
-      throw new ExactRunSignalError({ code: 'terminal-run', expectedRunId });
-    }
-
     const signal = createSignal({
       id: input.id,
       type: 'user',
@@ -1821,7 +1820,10 @@ export class AgentThreadStreamRuntime {
         const localRecord = state.threadRunsById.get(data.runId);
         if (!localRecord || state.threadKeysByRunId.get(data.runId) !== key) return;
         const signal = createSignal(data.signal);
-        const decision = this.#queueExactSignal(state, key, data.runId, signal, resolvedPubSub);
+        const decision =
+          localRecord.agent.id === agent.id
+            ? this.#queueExactSignal(state, key, data.runId, signal, resolvedPubSub)
+            : 'not-steerable';
         const reply: ExactRunSignalReply =
           decision === 'accepted' || decision === 'duplicate'
             ? { type: 'exact-signal-accepted', runId: data.runId, signalId: signal.id }
@@ -1846,6 +1848,7 @@ export class AgentThreadStreamRuntime {
         return;
       }
       if (data.type === 'run-failed') {
+        this.#discardUndrainedExactSignals(state, key, data.runId);
         this.#markTerminalRun(state, data.runId);
         const eventStreamId = data.streamId ?? data.runId;
         clearActiveIfCurrent(data.runId, data.streamId);
