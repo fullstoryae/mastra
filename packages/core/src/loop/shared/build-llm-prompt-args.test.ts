@@ -5,10 +5,17 @@ describe('buildLlmPromptArgs', () => {
   it('returns undefined supportedUrls when the model has none', async () => {
     const result = await buildLlmPromptArgs({ model: { supportedUrls: undefined } });
     expect(result).toEqual({
+      provider: undefined,
       supportedUrls: undefined,
       downloadRetries: undefined,
       downloadConcurrency: undefined,
     });
+  });
+
+  it('passes the resolved provider through for prompt compatibility', async () => {
+    for (const provider of ['openai', 'openai.responses', 'google.generative-ai']) {
+      expect((await buildLlmPromptArgs({ model: { provider } })).provider).toBe(provider);
+    }
   });
 
   it('returns supportedUrls directly when model exposes a sync record', async () => {

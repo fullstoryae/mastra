@@ -567,6 +567,7 @@ export class MessageList {
       // Used for creating LLM prompt messages without AI SDK streamText/generateText
       llmPrompt: async (
         options: {
+          provider?: string;
           downloadConcurrency?: number;
           downloadRetries?: number;
           supportedUrls?: Record<string, RegExp[]>;
@@ -689,7 +690,11 @@ export class MessageList {
           });
         }
 
-        messages = ensureGeminiCompatibleMessages(messages, this.logger);
+        // OpenAI accepts assistant-first history. Gemini padding here changes
+        // checkpoint prefixes between projection and subsequent history recall.
+        if (options.provider !== 'openai' && !options.provider?.startsWith('openai.')) {
+          messages = ensureGeminiCompatibleMessages(messages, this.logger);
+        }
 
         return messages
           .map(aiV5ModelMessageToV2PromptMessage)
@@ -704,6 +709,7 @@ export class MessageList {
       // Builds the v5 prompt, then converts it to the shape AI SDK v6 (spec 'v3')
       // providers require (tool-result `media` -> `image-data`/`file-data`).
       llmPrompt: async (options?: {
+        provider?: string;
         downloadConcurrency?: number;
         downloadRetries?: number;
         supportedUrls?: Record<string, RegExp[]>;
@@ -715,6 +721,7 @@ export class MessageList {
       // Builds the v5 prompt, then converts tool-result `media` parts to the
       // file content shape AI SDK v7 (spec 'v4') providers require.
       llmPrompt: async (options?: {
+        provider?: string;
         downloadConcurrency?: number;
         downloadRetries?: number;
         supportedUrls?: Record<string, RegExp[]>;

@@ -1,6 +1,7 @@
 import { convertToModelMessages } from '@internal/ai-sdk-v5';
 import { describe, expect, it, vi } from 'vitest';
 import type { IMastraLogger } from '../../../logger';
+import { buildLlmPromptArgs } from '../../../loop/shared/build-llm-prompt-args';
 import type { MastraDBMessage } from '../index';
 import { MessageList } from '../index';
 
@@ -18,6 +19,50 @@ function createMockLogger(): IMastraLogger & { warn: ReturnType<typeof vi.fn> } 
 }
 
 describe('MessageList - Gemini Compatibility', () => {
+  for (const version of ['aiV5', 'aiV6', 'aiV7'] as const) {
+    describe(`${version} resolved-provider prompt compatibility`, () => {
+      it.each(['openai', 'openai.responses', 'openai.chat'])(
+        'preserves assistant-first history for %s without changing source messages',
+        async provider => {
+          const list = new MessageList();
+          list.addSystem('Trusted instructions');
+          list.add({ role: 'assistant', content: 'Historical checkpoint' }, 'memory');
+          list.add({ role: 'user', content: 'Continue' }, 'input');
+          const original = structuredClone(list.get.all.db());
+          const args = await buildLlmPromptArgs({ model: { provider } });
+          const prompt = await list.get.all[version].llmPrompt(args);
+          expect(prompt.map(message => message.role)).toEqual(['system', 'assistant', 'user']);
+          expect(await list.get.all[version].llmPrompt(args)).toEqual(prompt);
+          expect(list.get.all.db()).toEqual(original);
+        },
+      );
+
+      it.each([undefined, 'google.generative-ai', 'anthropic.messages', 'openai-compatible'])(
+        'preserves existing padding for %s',
+        async provider => {
+          const list = new MessageList();
+          list.add({ role: 'assistant', content: 'Historical checkpoint' }, 'memory');
+          const prompt = await list.get.all[version].llmPrompt(await buildLlmPromptArgs({ model: { provider } }));
+          expect(prompt[0]).toEqual({ role: 'user', content: [{ type: 'text', text: '.' }] });
+          expect(prompt[1].role).toBe('assistant');
+        },
+      );
+
+      it('preserves a real period and empty/system-only prompts', async () => {
+        const args = await buildLlmPromptArgs({ model: { provider: 'openai.responses' } });
+        const list = new MessageList();
+        expect(await list.get.all[version].llmPrompt(args)).toEqual([]);
+        list.addSystem('Trusted instructions');
+        expect((await list.get.all[version].llmPrompt(args)).map(message => message.role)).toEqual(['system']);
+        list.add({ role: 'user', content: '.' }, 'input');
+        list.add({ role: 'assistant', content: 'Accepted answer' }, 'response');
+        const prompt = await list.get.all[version].llmPrompt(args);
+        expect(prompt[1]).toMatchObject({ role: 'user', content: [{ type: 'text', text: '.' }] });
+        expect(prompt).toHaveLength(3);
+      });
+    });
+  }
+
   describe('aiV5.prompt() - Gemini message ordering requirements', () => {
     it('should ensure first non-system message is user when starting with assistant', () => {
       const list = new MessageList();

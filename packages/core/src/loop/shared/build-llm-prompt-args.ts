@@ -18,10 +18,11 @@
 export interface BuildLlmPromptArgsInput {
   /**
    * The resolved AI SDK language model the request is about to be sent to.
-   * Only `supportedUrls` is read; other fields are ignored.
+   * Provider identity scopes prompt compatibility; supported URLs control downloads.
    */
   model:
     | {
+        provider?: string;
         supportedUrls?: Record<string, RegExp[]> | PromiseLike<Record<string, RegExp[]>>;
       }
     | null
@@ -39,6 +40,7 @@ export interface BuildLlmPromptArgsInput {
 }
 
 export interface BuildLlmPromptArgsResult {
+  provider: string | undefined;
   supportedUrls: Record<string, RegExp[]> | undefined;
   downloadRetries: number | undefined;
   downloadConcurrency: number | undefined;
@@ -59,6 +61,7 @@ export async function buildLlmPromptArgs({
     }
   }
   return {
+    provider: model?.provider,
     supportedUrls,
     downloadRetries,
     downloadConcurrency,
