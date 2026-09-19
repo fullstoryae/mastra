@@ -444,9 +444,25 @@ export class SessionRunEngine {
 
       case 'text-start': {
         const textIndex = state.currentMessage.content.parts.length;
-        state.currentMessage.content.parts.push({ type: 'text', text: '' });
+        const providerMetadata = getPayload(chunk).providerMetadata;
+        state.currentMessage.content.parts.push({
+          type: 'text',
+          text: '',
+          ...(isProviderMetadata(providerMetadata) ? { providerMetadata } : {}),
+        });
         state.textContentById.set(getString(getPayload(chunk).id) ?? '', { index: textIndex, text: '' });
         this.#session.emit({ type: 'message_start', message: this.cloneMessage(state.currentMessage) });
+        break;
+      }
+
+      case 'text-end': {
+        // Providers can complete text metadata at the end (e.g. OpenAI's response `phase`).
+        const textState = state.textContentById.get(getString(getPayload(chunk).id) ?? '');
+        const textContent = textState ? state.currentMessage.content.parts[textState.index] : undefined;
+        const providerMetadata = getPayload(chunk).providerMetadata;
+        if (textContent?.type === 'text' && isProviderMetadata(providerMetadata)) {
+          textContent.providerMetadata = { ...textContent.providerMetadata, ...providerMetadata };
+        }
         break;
       }
 

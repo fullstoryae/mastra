@@ -2354,8 +2354,19 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
         finishReason !== 'error' &&
         finishReason !== 'length' &&
         finishReason !== 'content-filter';
+      // An assistant message the provider marks as commentary (OpenAI's `phase`)
+      // is intermediate, not the answer, even when the step finishes with `stop`.
+      const lastTextPart = messageList.get.response
+        .db()
+        .findLast(message => message.role === 'assistant')
+        ?.content.parts.findLast(part => part.type === 'text');
+      const isCommentary = !!text && lastTextPart?.providerMetadata?.openai?.phase === 'commentary';
       const shouldContinue =
-        shouldRetry || (!tripwireTriggered && (hasPendingToolCalls || !TERMINAL_FINISH_REASONS.includes(finishReason)));
+        shouldRetry ||
+        (!tripwireTriggered &&
+          (hasPendingToolCalls ||
+            (finishReason === 'stop' && isCommentary) ||
+            !TERMINAL_FINISH_REASONS.includes(finishReason)));
 
       // On terminal exit, materialize spans for provider tool calls whose result never arrived.
       // On retry (shouldRetry), pending calls from the rejected attempt must also be flushed —

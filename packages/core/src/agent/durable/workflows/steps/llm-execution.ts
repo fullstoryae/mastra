@@ -1536,8 +1536,16 @@ export function createDurableLLMExecutionStep(_options?: DurableLLMExecutionStep
               }
             }
 
-            // 13. Determine if we should continue (has tool calls)
-            const isContinued = toolCalls.length > 0 && finishReason !== 'stop';
+            // 13. Determine if we should continue (has tool calls, or ended with
+            // text the provider marks as commentary, OpenAI's `phase`, which is
+            // intermediate rather than the answer even when finishReason is `stop`)
+            const lastTextPart = builtMessages
+              .findLast(message => message.role === 'assistant')
+              ?.content.parts.findLast(part => part.type === 'text');
+            const isCommentary =
+              textDeltas.length > 0 && lastTextPart?.providerMetadata?.openai?.phase === 'commentary';
+            const isContinued =
+              (toolCalls.length > 0 && finishReason !== 'stop') || (finishReason === 'stop' && isCommentary);
             const hasToolCalls = toolCalls.length > 0;
 
             // 13.5. Run processOutputStep for output processors (runs AFTER LLM response, BEFORE tool execution)

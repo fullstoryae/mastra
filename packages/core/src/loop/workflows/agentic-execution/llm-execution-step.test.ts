@@ -549,6 +549,67 @@ describe('createLLMExecutionStep gateway provider tools', () => {
     expect(result.stepResult.isContinued).toBe(false);
   });
 
+  it.each([
+    { phase: 'commentary', isContinued: true },
+    { phase: 'final_answer', isContinued: false },
+  ])('continues after a stop only when its text is commentary ($phase)', async ({ phase, isContinued }) => {
+    const providerMetadata = { openai: { itemId: 'msg-1', phase } };
+    const llmExecutionStep = createLLMExecutionStep({
+      agentId: 'test-agent',
+      messageId: 'msg-0',
+      runId: 'test-run',
+      startTimestamp: Date.now(),
+      methodType: 'stream',
+      controller,
+      outputWriter: vi.fn(),
+      messageList,
+      models: [
+        {
+          id: 'test-model',
+          maxRetries: 0,
+          model: {
+            specificationVersion: 'v2' as const,
+            provider: 'mock-provider',
+            modelId: 'mock-model-id',
+            supportedUrls: {},
+            doGenerate: vi.fn(),
+            doStream: vi.fn(async () => ({
+              stream: convertArrayToReadableStream([
+                { type: 'text-start', id: 'text-1', providerMetadata },
+                { type: 'text-delta', id: 'text-1', delta: 'Checking the files.' },
+                { type: 'text-end', id: 'text-1', providerMetadata },
+                { type: 'finish', finishReason: 'stop', usage: testUsage },
+              ]),
+              request: {},
+              response: {
+                headers: undefined,
+              },
+              warnings: [],
+            })),
+          } as any,
+        },
+      ],
+      streamState: {
+        serialize: vi.fn(),
+        deserialize: vi.fn(),
+      },
+      _internal: {
+        generateId: () => 'generated-id',
+      },
+      logger: {
+        error: vi.fn(),
+        warn: vi.fn(),
+        debug: vi.fn(),
+      } as any,
+    } as unknown as OuterLLMRun);
+
+    const result = await llmExecutionStep.execute(createExecuteParams(createIterationInput()));
+
+    // A provider that marks its text as commentary has not given its answer yet.
+    expect(result.stepResult.reason).toBe('stop');
+    expect(result.stepResult.isContinued).toBe(isContinued);
+  });
+
   it('creates a client tool observability span early and ends it with streamed args', async () => {
     const carrier = {
       traceparent: '00-1234567890abcdef1234567890abcdef-abcdef1234567890-01',

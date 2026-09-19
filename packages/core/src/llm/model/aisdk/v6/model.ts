@@ -1,4 +1,6 @@
+import type { LanguageModelV2Prompt } from '@ai-sdk/provider-v5';
 import type { LanguageModelV3, LanguageModelV3CallOptions } from '@ai-sdk/provider-v6';
+import { aiV5PromptToAIV6Prompt } from '../../../../agent/message-list/conversion/to-prompt';
 import type { MastraLanguageModelV3 } from '../../shared.types';
 import { createStreamFromGenerateResult } from '../generate-to-stream';
 
@@ -26,6 +28,25 @@ function remapToolsToV3(options: LanguageModelV3CallOptions): LanguageModelV3Cal
     ...options,
     tools: remappedTools as typeof options.tools,
   };
+}
+
+/**
+ * ModelRouter presents V2 call options even when it resolves a V3 provider, so
+ * tool results can still carry V2 `media` parts, which V3 providers omit.
+ * Convert them to the V3 `image-data`/`file-data` shape; parts already in that
+ * shape are left unchanged.
+ */
+function remapToolResultMediaToV3(options: LanguageModelV3CallOptions): LanguageModelV3CallOptions {
+  const prompt = aiV5PromptToAIV6Prompt(options.prompt as unknown as LanguageModelV2Prompt);
+
+  return {
+    ...options,
+    prompt: prompt as unknown as typeof options.prompt,
+  };
+}
+
+function remapCallOptionsToV3(options: LanguageModelV3CallOptions): LanguageModelV3CallOptions {
+  return remapToolsToV3(remapToolResultMediaToV3(options));
 }
 
 /**
@@ -66,7 +87,7 @@ export class AISDKV6LanguageModel implements MastraLanguageModelV3 {
   }
 
   async doGenerate(options: LanguageModelV3CallOptions) {
-    const result = await this.#model.doGenerate(remapToolsToV3(options));
+    const result = await this.#model.doGenerate(remapCallOptionsToV3(options));
 
     return {
       ...result,
@@ -77,7 +98,7 @@ export class AISDKV6LanguageModel implements MastraLanguageModelV3 {
   }
 
   async doStream(options: LanguageModelV3CallOptions) {
-    return await this.#model.doStream(remapToolsToV3(options));
+    return await this.#model.doStream(remapCallOptionsToV3(options));
   }
 
   /**

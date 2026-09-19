@@ -95,6 +95,32 @@ describe('SessionRunEngine — MastraDBMessage contract', () => {
     expect(message.role).toBe('assistant');
   });
 
+  it('Given text with provider metadata, When it starts and ends, Then the text part keeps the metadata', async () => {
+    const { engine } = createHarness();
+    const state = engine.createStreamState();
+    const ctx = requestContext();
+
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'text-start', payload: { id: 't1', providerMetadata: { openai: { itemId: 'msg_1' } } } }),
+      ctx,
+    );
+    await engine.processStreamChunk(state, chunk({ type: 'text-delta', payload: { id: 't1', text: 'Done.' } }), ctx);
+    await engine.processStreamChunk(
+      state,
+      chunk({
+        type: 'text-end',
+        payload: { id: 't1', providerMetadata: { openai: { itemId: 'msg_1', phase: 'final_answer' } } },
+      }),
+      ctx,
+    );
+
+    // The provider's response phase reaches the message the run ends with.
+    expect(state.currentMessage.content.parts).toEqual([
+      { type: 'text', text: 'Done.', providerMetadata: { openai: { itemId: 'msg_1', phase: 'final_answer' } } },
+    ]);
+  });
+
   it('Given a reasoning stream, When chunks arrive, Then it emits a reasoning part', async () => {
     const { engine, events } = createHarness();
     const state = engine.createStreamState();
