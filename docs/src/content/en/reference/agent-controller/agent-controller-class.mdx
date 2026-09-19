@@ -268,6 +268,13 @@ unsubscribe()
     ],
   },
   {
+    name: 'subagentToolDescription',
+    type: '(subagents: AgentControllerSubagent[]) => string',
+    description:
+      'Builds the description of the built-in `subagent` tool from the registered subagents. When omitted, the default description is used.',
+    isOptional: true,
+  },
+  {
     name: 'gateways',
     type: 'MastraModelGatewayInterface[]',
     description: 'Custom model gateways merged with the built-in gateways.',

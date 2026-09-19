@@ -1811,6 +1811,7 @@ export class AgentController<TState = {}> {
       const hasMemory = Boolean(this.config.memory);
       builtInTools.subagent = createSubagentTool({
         subagents: this.config.subagents,
+        description: this.config.subagentToolDescription?.(this.config.subagents),
         resolveModel: (modelId: string) => modelId,
         mastra: this.getMastra(),
         controllerTools: resolvedControllerTools,

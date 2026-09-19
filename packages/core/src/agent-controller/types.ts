@@ -321,6 +321,14 @@ export interface AgentControllerConfig<TState = {}> {
   subagents?: AgentControllerSubagent[];
 
   /**
+   * Builds the description of the built-in `subagent` tool from the registered
+   * subagent definitions, so the parent agent is told in your own words when and
+   * how to delegate. Return the same text for the same subagents to keep the
+   * prompt-cache prefix stable. When omitted, the default description is used.
+   */
+  subagentToolDescription?: (subagents: AgentControllerSubagent[]) => string;
+
+  /**
    * Model gateways registered on AgentController' internal Mastra instance.
    * The AgentController resolves every model — mode agents, Observational Memory,
    * subagents — and builds the `listAvailableModels()` catalog through these

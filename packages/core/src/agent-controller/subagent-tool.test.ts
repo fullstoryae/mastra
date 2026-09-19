@@ -75,6 +75,37 @@ const subagents: AgentControllerSubagent[] = [
 
 const resolveModel = vi.fn().mockReturnValue({ modelId: 'test-model' });
 
+describe('createSubagentTool description', () => {
+  it('keeps the default description byte-identical when none is given', () => {
+    const defaultDescription = `Delegate a focused task to a specialized subagent. The subagent runs independently with a constrained toolset, then returns its findings as text.
+
+Available agent types:
+- **explore** (Explore): Read-only codebase exploration.
+- **execute** (Execute): Task execution with write capabilities.
+
+By default the subagent runs in its own context — it does NOT see the parent conversation history. Write a clear, self-contained task description.
+
+Set \`forked: true\` for context-dependent parallel work that needs the parent conversation, prior tool results, or the parent tool environment. Omit it for self-contained delegation. A forked subagent reuses the parent agent's instructions and tools so the prompt prefix stays cache-friendly.
+
+Use this tool when:
+- You want to run multiple investigations in parallel
+- The task is self-contained and can be delegated`;
+
+    const tool = createSubagentTool({ subagents, resolveModel });
+
+    expect(tool.description).toBe(defaultDescription);
+  });
+
+  it('uses a given description verbatim', () => {
+    const description =
+      'Hand work to a specialist.\n\nSpecialists:\n- explore (Explore): Read-only codebase exploration.';
+
+    const tool = createSubagentTool({ subagents, resolveModel, description });
+
+    expect(tool.description).toBe(description);
+  });
+});
+
 describe('createSubagentTool requestContext forwarding', () => {
   beforeEach(() => {
     vi.clearAllMocks();

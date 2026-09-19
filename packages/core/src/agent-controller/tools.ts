@@ -69,6 +69,8 @@ export { TaskStateProcessor } from '../tools/builtin/task-state-processor';
 
 export interface CreateSubagentToolOptions {
   subagents: AgentControllerSubagent[];
+  /** Tool description shown to the model. Defaults to one generated from `subagents`. */
+  description?: string;
   resolveModel: (modelId: string) => MastraModelConfig;
   /** Resolved controller tools (already evaluated from DynamicArgument) */
   controllerTools?: ToolsInput;
@@ -122,7 +124,9 @@ export function createSubagentTool(opts: CreateSubagentToolOptions) {
 
   return createTool({
     id: 'subagent',
-    description: `Delegate a focused task to a specialized subagent. The subagent runs independently with a constrained toolset, then returns its findings as text.
+    description:
+      opts.description ??
+      `Delegate a focused task to a specialized subagent. The subagent runs independently with a constrained toolset, then returns its findings as text.
 
 Available agent types:
 ${typeDescriptions}
