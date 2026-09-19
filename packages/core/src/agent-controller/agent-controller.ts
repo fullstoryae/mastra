@@ -1812,6 +1812,7 @@ export class AgentController<TState = {}> {
       builtInTools.subagent = createSubagentTool({
         subagents: this.config.subagents,
         description: this.config.subagentToolDescription?.(this.config.subagents),
+        inputs: this.config.subagentToolInputs,
         resolveModel: (modelId: string) => modelId,
         mastra: this.getMastra(),
         controllerTools: resolvedControllerTools,

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { RequestContext } from '../request-context';
+import { standardSchemaToJSONSchema } from '../schema';
 
 // We need to mock Agent before importing tools.ts.
 const { mockStream, MockAgent, mockCreateWorkspaceTools } = vi.hoisted(() => {
@@ -103,6 +104,126 @@ Use this tool when:
     const tool = createSubagentTool({ subagents, resolveModel, description });
 
     expect(tool.description).toBe(description);
+  });
+});
+
+describe('createSubagentTool inputs', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function inputSchemaOf(tool: ReturnType<typeof createSubagentTool>) {
+    return standardSchemaToJSONSchema(tool.inputSchema!, { io: 'input' }) as { properties: Record<string, unknown> };
+  }
+
+  const subagentsWithModel: AgentControllerSubagent[] = subagents.map(subagent => ({
+    ...subagent,
+    defaultModelId: 'openai/gpt-5.5',
+  }));
+
+  it('keeps the default input schema byte-identical when no inputs are set', () => {
+    const defaultInputSchema = {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        agentType: { type: 'string', enum: ['explore', 'execute'], description: 'Type of subagent to spawn' },
+        task: {
+          type: 'string',
+          description:
+            'Clear, self-contained description of what the subagent should do. For non-forked subagents include all relevant context — the subagent cannot see the parent conversation.',
+        },
+        modelId: {
+          description:
+            "Optional model ID override for this task. Ignored when `forked: true` (the parent agent's model is used).",
+          type: 'string',
+        },
+        forked: {
+          description:
+            "If true, fork the parent conversation: clone the parent thread and run with the parent agent's instructions/tools so prompt cache is preserved. Requires memory to be configured on the AgentController. Defaults to the subagent definition's `forked` setting.",
+          type: 'boolean',
+        },
+      },
+      required: ['agentType', 'task'],
+      additionalProperties: false,
+    };
+
+    const tool = createSubagentTool({ subagents, resolveModel });
+
+    expect(JSON.stringify(inputSchemaOf(tool))).toBe(JSON.stringify(defaultInputSchema));
+  });
+
+  it('leaves modelId out when it is not offered, so a sent model id is not used', async () => {
+    mockStream.mockResolvedValue(createMockStreamResponse('done'));
+
+    const tool = createSubagentTool({ subagents: subagentsWithModel, resolveModel, inputs: { modelId: false } });
+
+    expect(Object.keys(inputSchemaOf(tool).properties)).toEqual(['agentType', 'task', 'forked']);
+
+    const result = await (tool as any).execute(
+      { agentType: 'explore', task: 'Look around', modelId: 'anthropic/claude-sonnet-4-5' },
+      { requestContext: new RequestContext(), agent: { toolCallId: 'tc-model-off' } },
+    );
+
+    expect(result.isError).toBe(false);
+    expect(resolveModel).toHaveBeenCalledTimes(1);
+    expect(resolveModel).toHaveBeenCalledWith('openai/gpt-5.5');
+  });
+
+  it('leaves forked out when it is not offered, so a sent forked flag does not fork', async () => {
+    const parentStream = vi.fn();
+    const cloneThreadForFork = vi.fn();
+    mockStream.mockResolvedValue(createMockStreamResponse('done'));
+
+    const tool = createSubagentTool({
+      subagents: subagentsWithModel,
+      resolveModel,
+      getParentAgent: () => ({ stream: parentStream }) as any,
+      cloneThreadForFork,
+      inputs: { forked: false },
+    });
+
+    expect(Object.keys(inputSchemaOf(tool).properties)).toEqual(['agentType', 'task', 'modelId']);
+    expect(tool.description).not.toContain('forked');
+
+    const requestContext = new RequestContext();
+    requestContext.set('controller', { emitEvent: vi.fn(), threadId: 'p-thread', resourceId: 'rid' });
+
+    const result = await (tool as any).execute(
+      { agentType: 'explore', task: 'Look around', forked: true },
+      { requestContext, agent: { toolCallId: 'tc-fork-off' } },
+    );
+
+    expect(result.isError).toBe(false);
+    expect(cloneThreadForFork).not.toHaveBeenCalled();
+    expect(parentStream).not.toHaveBeenCalled();
+    expect(mockStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores inputs that are not offered when a resumed call skips input validation', async () => {
+    const parentStream = vi.fn();
+    const cloneThreadForFork = vi.fn();
+    mockStream.mockResolvedValue(createMockStreamResponse('done'));
+
+    const tool = createSubagentTool({
+      subagents: subagentsWithModel,
+      resolveModel,
+      getParentAgent: () => ({ stream: parentStream }) as any,
+      cloneThreadForFork,
+      inputs: { modelId: false, forked: false },
+    });
+
+    const requestContext = new RequestContext();
+    requestContext.set('controller', { emitEvent: vi.fn(), threadId: 'p-thread', resourceId: 'rid' });
+
+    const result = await (tool as any).execute(
+      { agentType: 'explore', task: 'Look around', modelId: 'anthropic/claude-sonnet-4-5', forked: true },
+      { requestContext, agent: { toolCallId: 'tc-resumed', resumeData: { resumed: true } } },
+    );
+
+    expect(result.isError).toBe(false);
+    expect(resolveModel).toHaveBeenCalledWith('openai/gpt-5.5');
+    expect(cloneThreadForFork).not.toHaveBeenCalled();
+    expect(parentStream).not.toHaveBeenCalled();
   });
 });
 

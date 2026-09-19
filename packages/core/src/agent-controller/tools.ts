@@ -12,7 +12,7 @@ import { summarizeTaskCheck } from '../tools/builtin/task-tools';
 import { createTool } from '../tools/tool';
 import { createWorkspaceTools } from '../workspace/tools/tools';
 
-import type { AgentControllerRequestContext, AgentControllerSubagent } from './types';
+import type { AgentControllerConfig, AgentControllerRequestContext, AgentControllerSubagent } from './types';
 
 // `ask_user` is an agent-agnostic built-in tool. It is defined in
 // `../tools/builtin/ask-user` and re-exported here so the AgentController toolset and
@@ -71,6 +71,8 @@ export interface CreateSubagentToolOptions {
   subagents: AgentControllerSubagent[];
   /** Tool description shown to the model. Defaults to one generated from `subagents`. */
   description?: string;
+  /** Optional inputs offered to the model. Each is offered unless set to `false`. */
+  inputs?: AgentControllerConfig['subagentToolInputs'];
   resolveModel: (modelId: string) => MastraModelConfig;
   /** Resolved controller tools (already evaluated from DynamicArgument) */
   controllerTools?: ToolsInput;
@@ -122,6 +124,15 @@ export function createSubagentTool(opts: CreateSubagentToolOptions) {
 
   const typeDescriptions = subagents.map(s => `- **${s.id}** (${s.name}): ${s.description}`).join('\n');
 
+  const offersModelId = opts.inputs?.modelId ?? true;
+  const offersForked = opts.inputs?.forked ?? true;
+
+  const forkedGuidance = offersForked
+    ? `
+
+Set \`forked: true\` for context-dependent parallel work that needs the parent conversation, prior tool results, or the parent tool environment. Omit it for self-contained delegation. A forked subagent reuses the parent agent's instructions and tools so the prompt prefix stays cache-friendly.`
+    : '';
+
   return createTool({
     id: 'subagent',
     description:
@@ -131,35 +142,44 @@ export function createSubagentTool(opts: CreateSubagentToolOptions) {
 Available agent types:
 ${typeDescriptions}
 
-By default the subagent runs in its own context — it does NOT see the parent conversation history. Write a clear, self-contained task description.
-
-Set \`forked: true\` for context-dependent parallel work that needs the parent conversation, prior tool results, or the parent tool environment. Omit it for self-contained delegation. A forked subagent reuses the parent agent's instructions and tools so the prompt prefix stays cache-friendly.
+By default the subagent runs in its own context — it does NOT see the parent conversation history. Write a clear, self-contained task description.${forkedGuidance}
 
 Use this tool when:
 - You want to run multiple investigations in parallel
 - The task is self-contained and can be delegated`,
-    inputSchema: z.object({
-      agentType: z.enum(subagentIds as [string, ...string[]]).describe('Type of subagent to spawn'),
-      task: z
-        .string()
-        .describe(
-          'Clear, self-contained description of what the subagent should do. For non-forked subagents include all relevant context — the subagent cannot see the parent conversation.',
-        ),
-      modelId: z
-        .string()
-        .optional()
-        .describe(
-          "Optional model ID override for this task. Ignored when `forked: true` (the parent agent's model is used).",
-        ),
-      forked: z
-        .boolean()
-        .optional()
-        .describe(
-          "If true, fork the parent conversation: clone the parent thread and run with the parent agent's instructions/tools so prompt cache is preserved. Requires memory to be configured on the AgentController. Defaults to the subagent definition's `forked` setting.",
-        ),
-    }),
+    inputSchema: z
+      .object({
+        agentType: z.enum(subagentIds as [string, ...string[]]).describe('Type of subagent to spawn'),
+        task: z
+          .string()
+          .describe(
+            'Clear, self-contained description of what the subagent should do. For non-forked subagents include all relevant context — the subagent cannot see the parent conversation.',
+          ),
+        modelId: z
+          .string()
+          .optional()
+          .describe(
+            "Optional model ID override for this task. Ignored when `forked: true` (the parent agent's model is used).",
+          ),
+        forked: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true, fork the parent conversation: clone the parent thread and run with the parent agent's instructions/tools so prompt cache is preserved. Requires memory to be configured on the AgentController. Defaults to the subagent definition's `forked` setting.",
+          ),
+      })
+      .pick({
+        agentType: true,
+        task: true,
+        ...(offersModelId && { modelId: true }),
+        ...(offersForked && { forked: true }),
+      }),
     execute: async (input, context) => {
-      const { agentType, modelId, forked } = input;
+      const { agentType } = input;
+      // Input validation is skipped when a tool call is resumed, so an input
+      // that is not offered can still arrive in the raw arguments.
+      const modelId = offersModelId ? input.modelId : undefined;
+      const forked = offersForked ? input.forked : undefined;
       let { task } = input;
       const displayTask = task;
       const definition = subagents.find(s => s.id === agentType);
@@ -185,6 +205,7 @@ Use this tool when:
       let streamMemory: { thread: string; resource?: string } | undefined;
       let streamMaxSteps: number | undefined;
       let streamStopWhen: AgentControllerSubagent['stopWhen'];
+      let streamProviderOptions: AgentControllerSubagent['providerOptions'];
       let streamPrepareStep: ((args: { tools?: Record<string, unknown> }) => { activeTools: string[] }) | undefined;
       let forkedToolsets: ToolsetsInput | undefined;
 
@@ -349,6 +370,7 @@ Use this tool when:
 
         streamMaxSteps = definition.maxSteps ?? (definition.stopWhen ? undefined : 50);
         streamStopWhen = definition.stopWhen;
+        streamProviderOptions = definition.providerOptions;
         streamPrepareStep =
           allowedWs && allWorkspaceToolNames
             ? ({ tools }) => ({
@@ -395,6 +417,7 @@ Use this tool when:
           requestContext: subagentRequestContext,
           ...(streamMemory && { memory: streamMemory }),
           ...(forkedToolsets && { toolsets: forkedToolsets }),
+          ...(streamProviderOptions && { providerOptions: streamProviderOptions }),
           ...(context?.tracingContext && { tracingContext: context.tracingContext }),
           prepareStep: streamPrepareStep,
         });

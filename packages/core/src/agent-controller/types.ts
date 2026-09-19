@@ -5,6 +5,7 @@ import type { MastraBrowser } from '../browser/browser';
 import type { AgentControllerChannelsConfig } from '../channels/agent-controller-channels';
 import type { PubSub } from '../events/pubsub';
 import type { MastraModelGatewayInterface } from '../llm/model/gateways';
+import type { ProviderOptions } from '../llm/model/provider-options';
 import type { LoopOptions } from '../loop/types';
 import type { MastraMemory } from '../memory/memory';
 import type { ObservabilityEntrypoint } from '../observability/types/core';
@@ -176,6 +177,12 @@ export interface AgentControllerSubagent {
   stopWhen?: LoopOptions['stopWhen'];
 
   /**
+   * Provider-specific options passed to this subagent's model calls, for
+   * example a reasoning effort.
+   */
+  providerOptions?: ProviderOptions;
+
+  /**
    * Workspace tool keys (after any renames) the model is allowed to call.
    * When set, workspace tools not in this list are hidden via `prepareStep`.
    * Non-workspace tools are never affected. When omitted, all workspace
@@ -190,11 +197,12 @@ export interface AgentControllerSubagent {
    * instructions and tools, preserving prompt-cache prefix.
    *
    * The parent's `instructions`, `tools`, `allowedControllerTools`,
-   * `allowedWorkspaceTools`, and `defaultModelId` fields on the definition
-   * are ignored when a run is forked — the parent agent is used as-is.
+   * `allowedWorkspaceTools`, `defaultModelId`, and `providerOptions` fields on
+   * the definition are ignored when a run is forked — the parent agent is used as-is.
    *
    * Callers can override per-invocation by passing `forked` in the tool
-   * input. Forked subagents require memory to be configured on the AgentController.
+   * input, unless `subagentToolInputs.forked` is `false`. Forked subagents
+   * require memory to be configured on the AgentController.
    *
    * @default false
    */
@@ -327,6 +335,27 @@ export interface AgentControllerConfig<TState = {}> {
    * prompt-cache prefix stable. When omitted, the default description is used.
    */
   subagentToolDescription?: (subagents: AgentControllerSubagent[]) => string;
+
+  /**
+   * Which optional inputs the built-in `subagent` tool offers the model. Each
+   * input is offered unless set to `false`. An input that is not offered is left
+   * out of the tool's input schema, so the model cannot set it; the subagent
+   * definition's `forked` and `defaultModelId` and the session's subagent model
+   * still apply.
+   */
+  subagentToolInputs?: {
+    /**
+     * Offer `modelId`, which overrides the subagent's model for one call.
+     * @default true
+     */
+    modelId?: boolean;
+    /**
+     * Offer `forked`, which runs one call on a clone of the parent conversation
+     * with the parent agent.
+     * @default true
+     */
+    forked?: boolean;
+  };
 
   /**
    * Model gateways registered on AgentController' internal Mastra instance.

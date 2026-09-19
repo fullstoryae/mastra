@@ -257,6 +257,13 @@ unsubscribe()
           { name: 'maxSteps', type: 'number', description: 'Maximum execution steps.', isOptional: true },
           { name: 'stopWhen', type: 'LoopOptions["stopWhen"]', description: 'Loop stop condition.', isOptional: true },
           {
+            name: 'providerOptions',
+            type: 'ProviderOptions',
+            description:
+              'Provider-specific options for the subagent model calls, such as a reasoning effort. Not used by forked runs.',
+            isOptional: true,
+          },
+          {
             name: 'forked',
             type: 'boolean',
             description: 'Whether the subagent inherits a cloned parent thread by default.',
@@ -273,6 +280,35 @@ unsubscribe()
     description:
       'Builds the description of the built-in `subagent` tool from the registered subagents. When omitted, the default description is used.',
     isOptional: true,
+  },
+  {
+    name: 'subagentToolInputs',
+    type: '{ modelId?: boolean; forked?: boolean }',
+    description:
+      'Optional inputs the built-in `subagent` tool offers the model. An input set to `false` is left out of the tool input, so the model cannot set it.',
+    isOptional: true,
+    properties: [
+      {
+        type: '{ modelId?: boolean; forked?: boolean }',
+        parameters: [
+          {
+            name: 'modelId',
+            type: 'boolean',
+            description: 'Offer `modelId`, which overrides the subagent model for one call.',
+            isOptional: true,
+            defaultValue: 'true',
+          },
+          {
+            name: 'forked',
+            type: 'boolean',
+            description:
+              'Offer `forked`, which runs one call on a clone of the parent conversation with the parent agent.',
+            isOptional: true,
+            defaultValue: 'true',
+          },
+        ],
+      },
+    ],
   },
   {
     name: 'gateways',
